@@ -10,19 +10,37 @@ type Waiter = {
   timer: number | null;
 };
 
-class ConnPoller {
+type PoolerOpts = {
+  min_idle_connections?: number;
+  max_connections?: number;
+};
+
+const MIN_IDLE_CONNECTIONS = 4;
+const MAX_CONNECTIONS = 10;
+
+class ConnPooler {
   idle: Array<Connection> = [];
+  min_idle_connections: number;
   busy = new Set<Connection>();
   total = 0;
-  //   idle_timeout = 5000; // ms
+  idle_timeout = 15000; // 15s
   waiting_queue: Array<Waiter> = [];
-  max_connections = 5;
-  acquire_timeout = 10000; // ms
+  max_connections: number;
+  acquire_timeout = 10000; // 10s
+  idle_checker: any = 0;
+
+  constructor(opts: PoolerOpts) {
+    this.min_idle_connections =
+      opts?.min_idle_connections ?? MIN_IDLE_CONNECTIONS;
+    this.max_connections = opts?.max_connections ?? MAX_CONNECTIONS;
+
+    this.start();
+  }
 
   acquire(): Connection | Promise<unknown> {
     if (this.idle.length) {
       const conn = this.idle.pop();
-      if (!conn) throw new Error("conn not found"); // throw
+      if (!conn) throw new Error("conn not found");
       this.busy.add(conn);
       return conn;
     }
@@ -74,5 +92,31 @@ class ConnPoller {
       fn: () => {},
       lastUsed: null,
     };
+  }
+
+  private start() {
+    this.idle_checker = setInterval(() => this.idle_check_runner(), 10_000);
+    this.idle_checker.unref(); // don't let this timer keep the process alive
+  }
+
+  idle_check_runner() {
+    const now = Date.now();
+
+    this.idle = this.idle.filter((conn) => {
+      const expired = conn?.lastUsed
+        ? now - conn.lastUsed > this.idle_timeout &&
+          this.total > this.min_idle_connections
+        : false;
+
+      if (expired) this.destroy(conn);
+      return !expired;
+    });
+  }
+
+  private destroy(conn: Connection) {
+    this.idle = this.idle.filter((c) => c.id === conn.id);
+    this.busy.delete(conn);
+    // in a real connection, close the conn
+    this.total--;
   }
 }
